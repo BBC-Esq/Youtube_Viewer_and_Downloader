@@ -1,4 +1,4 @@
-# Pytubefix-GUI
+# Youtube Downloader
 Provides a nice graphical user interface to use the [pytubefix library](https://github.com/JuanBindez/pytubefix) to download files from Youtube.
 
 # Installation
@@ -15,7 +15,7 @@ python -m venv .
 
 ### Install Libraries
 ```
-pip install -r requirements.txt
+python install.py
 ```
 
 # Usage
