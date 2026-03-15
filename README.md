@@ -1,8 +1,7 @@
 <div align="center">
 
-<img width="820" height="301" alt="image" src="https://github.com/user-attachments/assets/43b073f1-ac94-4e11-8e46-447f967cce35" />
+<img width="998" height="666" alt="image" src="https://github.com/user-attachments/assets/5db337bd-f37b-4d53-93f5-34ed2c9b9c3a" />
 
-### Provides a nice graphical user interface to use the [pytubefix library](https://github.com/JuanBindez/pytubefix) to download files from Youtube.<br>
 Requires [VLC Media Player](https://www.videolan.org/vlc/)
 
 </div>
