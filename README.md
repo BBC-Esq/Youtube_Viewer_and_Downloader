@@ -1,12 +1,16 @@
 <div align="center">
 
-<img width="998" height="666" alt="image" src="https://github.com/user-attachments/assets/5db337bd-f37b-4d53-93f5-34ed2c9b9c3a" />
+<img width="1152" height="627" alt="image" src="https://github.com/user-attachments/assets/f71cbb4e-72ad-4d64-9db0-350515450950" />
 
-Requires [VLC Media Player](https://www.videolan.org/vlc/)
+### Requires [VLC Media Player](https://www.videolan.org/vlc/)
 
 </div>
 
-<img width="1112" height="653" alt="image" src="https://github.com/user-attachments/assets/0e50a807-96cf-42a7-8fd6-6c24b7b0ca34" />
+<div align="center">
+  
+<img width="892" height="876" alt="image" src="https://github.com/user-attachments/assets/eb499e1f-61ec-43ee-9622-6381c4b22097" />
+
+</div>
 
 ## Installation
 
