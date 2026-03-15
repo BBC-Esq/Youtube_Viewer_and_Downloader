@@ -23,8 +23,8 @@ class MuxThread(QThread):
             video_in_stream = video_input.streams.video[0]
             audio_in_stream = audio_input.streams.audio[0]
 
-            video_out_stream = output.add_stream(template=video_in_stream)
-            audio_out_stream = output.add_stream(template=audio_in_stream)
+            video_out_stream = output.add_stream_from_template(video_in_stream)
+            audio_out_stream = output.add_stream_from_template(audio_in_stream)
 
             total_duration = video_in_stream.duration
             time_base = video_in_stream.time_base

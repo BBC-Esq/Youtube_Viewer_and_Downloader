@@ -11,6 +11,7 @@ libs_with_deps = [
     "pyside6",
     "av",
     "pytubefix",
+    "python-vlc"
 ]
 
 libs_no_deps = []

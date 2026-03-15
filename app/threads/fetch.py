@@ -4,7 +4,7 @@ from pytubefix import YouTube
 
 
 class FetchThread(QThread):
-    finished = Signal(list, list, list, str)
+    finished = Signal(list, list, list, str, str)
     error = Signal(str)
     client_switched = Signal(str, str)
 
@@ -43,9 +43,11 @@ class FetchThread(QThread):
                     "name": caption.name
                 })
 
+            thumbnail_url = yt.thumbnail_url or ""
+
             if yt.client != original_client:
                 self.client_switched.emit(original_client, yt.client)
 
-            self.finished.emit(streams_info, captions_info, streams_objects, "Data fetched successfully.")
+            self.finished.emit(streams_info, captions_info, streams_objects, "Data fetched successfully.", thumbnail_url)
         except Exception as e:
             self.error.emit(str(e))

@@ -3,25 +3,29 @@ import re
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QFrame, QGroupBox, QMessageBox,
-    QCheckBox, QProgressBar, QListWidget, QInputDialog
+    QCheckBox, QProgressBar, QListWidget, QInputDialog, QSizePolicy
 )
 from PySide6.QtCore import Qt, Slot, QSettings, QTimer
+from PySide6.QtGui import QPixmap
 
 from app.constants import (
-    AUDIO_FORMATS, CODEC_SAMPLE_FORMATS, CHANNEL_OPTIONS, detect_mux_container,
+    AUDIO_FORMATS, CODEC_SAMPLE_FORMATS, BITRATE_OPTIONS, SAMPLE_RATE_OPTIONS,
+    CHANNEL_OPTIONS, detect_mux_container,
     VIDEO_CODEC_NAMES, VIDEO_CODEC_TOOLTIPS, AUDIO_CODEC_NAMES, AUDIO_CODEC_TOOLTIPS
 )
 from app.threads import (
-    FetchThread, DownloadThread, CaptionDownloadThread, ConversionThread, MuxThread
+    FetchThread, DownloadThread, CaptionDownloadThread, ConversionThread, MuxThread,
+    ThumbnailThread
 )
 from app.dialogs import SettingsDialog
+from app.widgets import VideoPlayer
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("YouTube Downloader")
-        self.setGeometry(100, 100, 750, 500)
+        self.setGeometry(100, 100, 850, 700)
 
         self.settings = QSettings("YouTubeDownloader", "YouTubeDownloader")
         self.streams_objects = []
@@ -34,6 +38,8 @@ class MainWindow(QMainWindow):
         self.last_downloaded_file = ""
         self.temp_video_path = ""
         self.temp_audio_path = ""
+        self._pre_fullscreen_geometry = None
+        self._fullscreen_hidden_widgets = []
 
         menu_bar = self.menuBar()
         settings_menu = menu_bar.addMenu("Settings")
@@ -42,7 +48,7 @@ class MainWindow(QMainWindow):
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
+        self.main_layout = QVBoxLayout(central_widget)
 
         url_frame = QFrame()
         url_layout = QHBoxLayout(url_frame)
@@ -56,23 +62,66 @@ class MainWindow(QMainWindow):
         self.url_entry.textChanged.connect(self.on_url_text_changed)
         url_layout.addWidget(url_label)
         url_layout.addWidget(self.url_entry)
-        main_layout.addWidget(url_frame)
+        self.main_layout.addWidget(url_frame)
 
         self.use_oauth = QCheckBox("Use OAuth (required for some age-restricted videos)")
-        main_layout.addWidget(self.use_oauth)
+        self.main_layout.addWidget(self.use_oauth)
 
         self.error_label = QLabel()
         self.error_label.setStyleSheet("color: red;")
-        main_layout.addWidget(self.error_label)
+        self.main_layout.addWidget(self.error_label)
 
         self.title_label = QLabel()
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.title_label.setWordWrap(True)
-        main_layout.addWidget(self.title_label)
+        self.main_layout.addWidget(self.title_label)
 
-        options_group = QGroupBox("Download Options")
-        options_layout = QVBoxLayout(options_group)
+        self.player = VideoPlayer()
+        self.player.fullscreen_toggled.connect(self._handle_fullscreen)
+        self.player.error_occurred.connect(self._player_error)
+        self.player.play_requested.connect(self.preview_video)
+        self.main_layout.addWidget(self.player, stretch=1)
+
+        self.playback_frame = QFrame()
+        playback_layout = QHBoxLayout(self.playback_frame)
+        playback_layout.setContentsMargins(0, 2, 0, 2)
+        playback_layout.setSpacing(6)
+
+        self.pb_res_label = QLabel("Resolution:")
+        self.pb_resolution_combo = QComboBox()
+        self.pb_resolution_combo.currentIndexChanged.connect(self.on_pb_resolution_changed)
+        playback_layout.addWidget(self.pb_res_label)
+        playback_layout.addWidget(self.pb_resolution_combo)
+
+        self.pb_fmt_label = QLabel("Video Format:")
+        self.pb_format_combo = QComboBox()
+        playback_layout.addWidget(self.pb_fmt_label)
+        playback_layout.addWidget(self.pb_format_combo)
+
+        self.pb_audio_label = QLabel("Audio:")
+        self.pb_audio_combo = QComboBox()
+        playback_layout.addWidget(self.pb_audio_label)
+        playback_layout.addWidget(self.pb_audio_combo)
+
+        self.pb_update_button = QPushButton("Update")
+        self.pb_update_button.setFixedWidth(60)
+        self.pb_update_button.setEnabled(False)
+        self.pb_update_button.clicked.connect(self.apply_playback_settings)
+        playback_layout.addWidget(self.pb_update_button)
+
+        self._pb_active_video_itag = None
+        self._pb_active_audio_itag = None
+
+        self.pb_resolution_combo.currentIndexChanged.connect(self._on_pb_selection_changed)
+        self.pb_format_combo.currentIndexChanged.connect(self._on_pb_selection_changed)
+        self.pb_audio_combo.currentIndexChanged.connect(self._on_pb_selection_changed)
+
+        playback_layout.addStretch()
+        self.main_layout.addWidget(self.playback_frame)
+
+        self.options_group = QGroupBox("Download Options")
+        options_layout = QVBoxLayout(self.options_group)
 
         self.audio_only_checkbox = QCheckBox("Audio Only")
         self.audio_only_checkbox.toggled.connect(self.toggle_audio_only)
@@ -103,19 +152,64 @@ class MainWindow(QMainWindow):
         audio_q_layout.addWidget(self.audio_quality_combo)
         combos_layout.addLayout(audio_q_layout)
 
+        self.conversion_group = QGroupBox("Conversion Options")
+        conv_layout = QVBoxLayout(self.conversion_group)
+        conv_layout.setContentsMargins(6, 6, 6, 6)
+        conv_layout.setSpacing(3)
+
+        self.conversion_mode_combo = QComboBox()
+        self.conversion_mode_combo.addItems([
+            "No Conversion",
+            "Convert and Keep Original",
+            "Convert and Delete Original"
+        ])
+        self.conversion_mode_combo.currentTextChanged.connect(self._update_conversion_fields_state)
+        conv_layout.addWidget(self.conversion_mode_combo)
+
+        conv_row1 = QHBoxLayout()
+        conv_row1.setSpacing(4)
+        self.conv_format_combo = QComboBox()
+        self.conv_format_combo.addItems(list(AUDIO_FORMATS.keys()))
+        self.conv_format_combo.currentTextChanged.connect(self._update_bitrate_state)
+        conv_row1.addWidget(QLabel("Format:"))
+        conv_row1.addWidget(self.conv_format_combo)
+        self.conv_bitrate_combo = QComboBox()
+        self.conv_bitrate_combo.addItems([f"{b} kbps" for b in BITRATE_OPTIONS])
+        self.conv_bitrate_combo.setCurrentIndex(BITRATE_OPTIONS.index("192"))
+        conv_row1.addWidget(QLabel("Bitrate:"))
+        conv_row1.addWidget(self.conv_bitrate_combo)
+        conv_layout.addLayout(conv_row1)
+
+        conv_row2 = QHBoxLayout()
+        conv_row2.setSpacing(4)
+        self.conv_sample_rate_combo = QComboBox()
+        self.conv_sample_rate_combo.addItems([f"{r} Hz" for r in SAMPLE_RATE_OPTIONS])
+        self.conv_sample_rate_combo.setCurrentIndex(SAMPLE_RATE_OPTIONS.index("44100"))
+        conv_row2.addWidget(QLabel("Sample Rate:"))
+        conv_row2.addWidget(self.conv_sample_rate_combo)
+        self.conv_channels_combo = QComboBox()
+        self.conv_channels_combo.addItems(list(CHANNEL_OPTIONS.keys()))
+        conv_row2.addWidget(QLabel("Channels:"))
+        conv_row2.addWidget(self.conv_channels_combo)
+        conv_layout.addLayout(conv_row2)
+
+        self._update_conversion_fields_state()
+        self.conversion_group.setVisible(False)
+        combos_layout.addWidget(self.conversion_group)
+
         options_layout.addLayout(combos_layout)
 
-        main_layout.addWidget(options_group)
+        self.main_layout.addWidget(self.options_group)
 
         self.download_button = QPushButton("Download")
         self.download_button.setEnabled(False)
         self.download_button.setMinimumHeight(40)
         self.download_button.setStyleSheet("font-size: 14px; font-weight: bold;")
         self.download_button.clicked.connect(self.start_download_workflow)
-        main_layout.addWidget(self.download_button)
+        self.main_layout.addWidget(self.download_button)
 
-        transcripts_group = QGroupBox("Transcripts")
-        transcripts_layout = QHBoxLayout(transcripts_group)
+        self.transcripts_group = QGroupBox("Transcripts")
+        transcripts_layout = QHBoxLayout(self.transcripts_group)
         self.transcripts_list = QListWidget()
         self.transcripts_list.setMaximumHeight(80)
         transcripts_layout.addWidget(self.transcripts_list)
@@ -124,7 +218,7 @@ class MainWindow(QMainWindow):
         self.transcript_download_button.setFixedWidth(90)
         self.transcript_download_button.clicked.connect(self.download_transcript)
         transcripts_layout.addWidget(self.transcript_download_button)
-        main_layout.addWidget(transcripts_group)
+        self.main_layout.addWidget(self.transcripts_group)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -132,10 +226,10 @@ class MainWindow(QMainWindow):
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("%p%")
         self.progress_bar.setVisible(False)
-        main_layout.addWidget(self.progress_bar)
+        self.main_layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("Paste a YouTube URL above to get started.")
-        main_layout.addWidget(self.status_label)
+        self.main_layout.addWidget(self.status_label)
 
         self.transcripts_list.itemSelectionChanged.connect(
             lambda: self.transcript_download_button.setEnabled(
@@ -177,9 +271,14 @@ class MainWindow(QMainWindow):
         self.resolution_combo.clear()
         self.video_format_combo.clear()
         self.audio_quality_combo.clear()
+        self.pb_resolution_combo.clear()
+        self.pb_format_combo.clear()
+        self.pb_audio_combo.clear()
         self.transcripts_list.clear()
         self.download_button.setEnabled(False)
+
         self.url_entry.setEnabled(False)
+        self.player.stop()
 
         self.fetch_thread = FetchThread(url, use_oauth=self.use_oauth.isChecked())
         self.fetch_thread.finished.connect(self.update_info)
@@ -193,8 +292,8 @@ class MainWindow(QMainWindow):
             f"Client switched from {original_client} to {new_client} to fetch video data."
         )
 
-    @Slot(list, list, list, str)
-    def update_info(self, streams_info, captions_info, streams_objects, status):
+    @Slot(list, list, list, str, str)
+    def update_info(self, streams_info, captions_info, streams_objects, status, thumbnail_url):
         self.streams_objects = streams_objects
         self.captions_data = captions_info or []
         self.url_entry.setEnabled(True)
@@ -216,14 +315,107 @@ class MainWindow(QMainWindow):
 
         self.populate_resolution_combo()
         self.populate_audio_quality_combo()
+        self.populate_pb_resolution_combo()
+        self.populate_pb_audio_combo()
 
         self.transcripts_list.clear()
         for cap in self.captions_data:
             self.transcripts_list.addItem(f"{cap['name']} ({cap['code']})")
 
         self.download_button.setEnabled(True)
+
         self.status_label.setText(status)
         self.error_label.clear()
+
+        if thumbnail_url:
+            self.thumbnail_thread = ThumbnailThread(thumbnail_url)
+            self.thumbnail_thread.finished.connect(self._on_thumbnail_loaded)
+            self.thumbnail_thread.start()
+
+    @Slot(QPixmap)
+    def _on_thumbnail_loaded(self, pixmap):
+        self.player.set_thumbnail(pixmap)
+
+    def preview_video(self, seek_ms=None):
+        if self.audio_only_checkbox.isChecked():
+            audio_itag = self.pb_audio_combo.currentData()
+            audio_stream = self.find_stream_by_itag(audio_itag) if audio_itag else None
+            if not audio_stream:
+                return
+            self._pb_active_video_itag = None
+            self._pb_active_audio_itag = audio_itag
+            self.pb_update_button.setEnabled(False)
+            self.status_label.setText("Starting audio preview...")
+            self.player.play_stream(audio_stream.url, seek_ms=seek_ms)
+            self.status_label.setText("Playing audio preview.")
+            return
+
+        if not self.video_streams:
+            return
+
+        video_itag = self.pb_format_combo.currentData()
+        video_stream = self.find_stream_by_itag(video_itag) if video_itag else None
+        if not video_stream:
+            return
+
+        audio_itag = self.pb_audio_combo.currentData()
+        audio_stream = self.find_stream_by_itag(audio_itag) if audio_itag else None
+        if not audio_stream:
+            audio_stream = self.get_best_audio_for_video(video_stream)
+
+        video_url = video_stream.url
+        audio_url = audio_stream.url if audio_stream else None
+
+        self._pb_active_video_itag = video_itag
+        self._pb_active_audio_itag = audio_itag if audio_itag else (audio_stream.itag if audio_stream else None)
+        self.pb_update_button.setEnabled(False)
+
+        self.status_label.setText("Starting preview...")
+        self.player.play_stream(video_url, audio_url, seek_ms=seek_ms)
+        self.status_label.setText("Playing preview.")
+
+    def _on_pb_selection_changed(self):
+        current_video_itag = self.pb_format_combo.currentData()
+        current_audio_itag = self.pb_audio_combo.currentData()
+        has_active = self._pb_active_video_itag is not None or self._pb_active_audio_itag is not None
+        changed = (
+            current_video_itag != self._pb_active_video_itag or
+            current_audio_itag != self._pb_active_audio_itag
+        )
+        self.pb_update_button.setEnabled(changed and has_active)
+
+    def apply_playback_settings(self):
+        seek_ms = self.player.get_current_time_ms()
+        if seek_ms is None or seek_ms < 0:
+            seek_ms = None
+        self.player.stop()
+        self.preview_video(seek_ms=seek_ms)
+
+    def _handle_fullscreen(self, entering):
+        if entering:
+            self._pre_fullscreen_geometry = self.geometry()
+            self._fullscreen_hidden_widgets = []
+            for i in range(self.main_layout.count()):
+                w = self.main_layout.itemAt(i).widget()
+                if w and w is not self.player:
+                    if w.isVisible():
+                        self._fullscreen_hidden_widgets.append(w)
+                        w.hide()
+            self.menuBar().hide()
+            self.showFullScreen()
+        else:
+            for w in self._fullscreen_hidden_widgets:
+                w.show()
+            self._fullscreen_hidden_widgets = []
+            self.menuBar().show()
+            self.showNormal()
+            if self._pre_fullscreen_geometry:
+                self.setGeometry(self._pre_fullscreen_geometry)
+            self.player.show_controls()
+
+    @Slot(str)
+    def _player_error(self, msg):
+        self.error_label.setText(f"Player: {msg}")
 
     def populate_resolution_combo(self):
         self.resolution_combo.blockSignals(True)
@@ -313,11 +505,76 @@ class MainWindow(QMainWindow):
 
         self.update_audio_tooltip(self.audio_quality_combo.currentIndex())
 
+    def populate_pb_resolution_combo(self):
+        self.pb_resolution_combo.blockSignals(True)
+        self.pb_resolution_combo.clear()
+
+        resolutions = {}
+        for s in self.video_streams:
+            res = s.resolution
+            if res and res not in resolutions:
+                fps = getattr(s, 'fps', 30)
+                res_num = int(res.replace("p", "")) if res.replace("p", "").isdigit() else 0
+                resolutions[res] = (res_num, fps)
+
+        sorted_res = sorted(resolutions.keys(), key=lambda r: resolutions[r], reverse=True)
+        for res in sorted_res:
+            self.pb_resolution_combo.addItem(res)
+
+        self.pb_resolution_combo.blockSignals(False)
+        if sorted_res:
+            self.on_pb_resolution_changed()
+
+    def on_pb_resolution_changed(self):
+        self.pb_format_combo.clear()
+        resolution = self.pb_resolution_combo.currentText()
+        if not resolution:
+            return
+
+        matching = [s for s in self.video_streams if s.resolution == resolution]
+        matching.sort(key=lambda s: s.filesize_mb if s.filesize_mb else 0)
+
+        for s in matching:
+            raw_codec = s.video_codec.split(".")[0] if s.video_codec else ""
+            codec_display = VIDEO_CODEC_NAMES.get(raw_codec, raw_codec or s.subtype)
+            fps = getattr(s, 'fps', '')
+            fps_str = f" {fps}fps" if fps and fps != 30 else ""
+            bitrate = s.bitrate
+            if bitrate and bitrate >= 1_000_000:
+                br_str = f" {bitrate / 1_000_000:.1f} Mbps"
+            elif bitrate:
+                br_str = f" {bitrate // 1000} kbps"
+            else:
+                br_str = ""
+            label = f"{s.subtype.upper()} ({codec_display}){fps_str}{br_str}"
+            self.pb_format_combo.addItem(label, userData=s.itag)
+
+    def populate_pb_audio_combo(self):
+        self.pb_audio_combo.clear()
+
+        sorted_audio = sorted(
+            self.audio_streams,
+            key=lambda s: int(s.abr.replace("kbps", "")) if s.abr else 0,
+            reverse=True
+        )
+
+        for s in sorted_audio:
+            raw_codec = s.audio_codec.split(".")[0] if s.audio_codec else ""
+            codec_display = AUDIO_CODEC_NAMES.get(raw_codec, raw_codec or s.subtype)
+            bitrate = s.abr or "?"
+            label = f"{bitrate} ({codec_display})"
+            self.pb_audio_combo.addItem(label, userData=s.itag)
+
     def toggle_audio_only(self, checked):
         self.res_label.setVisible(not checked)
         self.resolution_combo.setVisible(not checked)
         self.fmt_label.setVisible(not checked)
         self.video_format_combo.setVisible(not checked)
+        self.pb_res_label.setVisible(not checked)
+        self.pb_resolution_combo.setVisible(not checked)
+        self.pb_fmt_label.setVisible(not checked)
+        self.pb_format_combo.setVisible(not checked)
+        self.conversion_group.setVisible(checked)
 
     def sanitize_filename(self, title):
         return re.sub(r'[\\/*?:"<>|]', "", title)
@@ -527,20 +784,35 @@ class MainWindow(QMainWindow):
                 except OSError:
                     pass
 
+    def _update_conversion_fields_state(self):
+        enabled = self.conversion_mode_combo.currentText() != "No Conversion"
+        self.conv_format_combo.setEnabled(enabled)
+        self.conv_bitrate_combo.setEnabled(enabled)
+        self.conv_sample_rate_combo.setEnabled(enabled)
+        self.conv_channels_combo.setEnabled(enabled)
+        if enabled:
+            self._update_bitrate_state()
+
+    def _update_bitrate_state(self):
+        if not self.conv_format_combo.isEnabled():
+            return
+        fmt = self.conv_format_combo.currentText()
+        is_lossy = AUDIO_FORMATS.get(fmt, {}).get("lossy", True)
+        self.conv_bitrate_combo.setEnabled(is_lossy)
+
     def should_convert_audio(self):
-        mode = self.settings.value("conversion_mode", "No Conversion")
-        return mode != "No Conversion"
+        return self.conversion_mode_combo.currentText() != "No Conversion"
 
     def start_audio_conversion(self, input_path):
-        fmt_name = self.settings.value("conversion_format", "MP3")
+        fmt_name = self.conv_format_combo.currentText()
         fmt_config = AUDIO_FORMATS.get(fmt_name, AUDIO_FORMATS["MP3"])
 
-        bitrate_str = self.settings.value("conversion_bitrate", "192")
+        bitrate_str = self.conv_bitrate_combo.currentText().replace(" kbps", "")
         bitrate = int(bitrate_str) * 1000
 
-        sample_rate = int(self.settings.value("conversion_sample_rate", "44100"))
+        sample_rate = int(self.conv_sample_rate_combo.currentText().replace(" Hz", ""))
 
-        channel_name = self.settings.value("conversion_channels", "Stereo")
+        channel_name = self.conv_channels_combo.currentText()
         channels = CHANNEL_OPTIONS.get(channel_name, 2)
 
         base, _ = os.path.splitext(input_path)
@@ -572,7 +844,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def conversion_completed(self, converted_path):
-        mode = self.settings.value("conversion_mode", "No Conversion")
+        mode = self.conversion_mode_combo.currentText()
         original = self.last_downloaded_file
 
         if mode == "Convert and Delete Original" and os.path.exists(original):
@@ -687,3 +959,7 @@ class MainWindow(QMainWindow):
         self.error_label.setText(f"Error: {error}")
         self.status_label.setText("Failed to fetch data.")
         self.url_entry.setEnabled(True)
+
+    def closeEvent(self, event):
+        self.player.release()
+        super().closeEvent(event)
