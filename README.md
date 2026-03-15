@@ -6,11 +6,15 @@
 
 </div>
 
+<details><summary>Image of what it looks like</summary>
+
 <div align="center">
   
 <img width="892" height="876" alt="image" src="https://github.com/user-attachments/assets/eb499e1f-61ec-43ee-9622-6381c4b22097" />
 
 </div>
+
+</details>
 
 ## Installation
 
